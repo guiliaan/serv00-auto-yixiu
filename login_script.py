@@ -44,75 +44,31 @@ async def login(username, password, panel):
     service_name = get_service_name(panel)
     try:
         if not browser:
-            browser = await launch(
-                headless=True,
-                args=[
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-blink-features=AutomationControlled',
-                    '--disable-dev-shm-usage',
-                    '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                ]
-            )
+            browser = await launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
 
         page = await browser.newPage()
-        # 注入 JS 隐藏自动化检测
-        await page.evaluateOnNewDocument('''() => {
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined,
-            });
-            Object.defineProperty(navigator, 'plugins', {
-                get: () => [1, 2, 3, 4, 5],
-            });
-        }''')
-
         url = f'https://{panel}/login/?next=/'
-        await page.goto(url, {'waitUntil': 'networkidle0', 'timeout': 30000})
+        await page.goto(url)
 
-        # 等待表单元素加载
-        try:
-            await page.waitForSelector('#id_username', timeout=10000)
-        except Exception as e:
-            print(f'{service_name} 等待用户名输入框失败: {e}')
-            return False
-
-        # 清空并输入用户名
         username_input = await page.querySelector('#id_username')
         if username_input:
             await page.evaluate('''(input) => input.value = ""''', username_input)
-        await page.type('#id_username', username, delay=random.randint(50, 150))
 
-        # 输入密码
-        await page.type('#id_password', password, delay=random.randint(50, 150))
+        await page.type('#id_username', username)
+        await page.type('#id_password', password)
 
-        # 点击登录按钮
         login_button = await page.querySelector('#submit')
         if login_button:
             await login_button.click()
         else:
-            # Fallback: 尝试提交表单
-            await page.evaluate('document.querySelector("form").submit()')
-            print(f'{service_name} 未找到 #submit 按钮，使用表单提交。')
+            raise Exception('无法找到登录按钮')
 
-        # 等待导航完成
-        try:
-            await page.waitForNavigation(options={'waitUntil': 'networkidle0', 'timeout': 30000})
-        except Exception as e:
-            print(f'{service_name} 导航等待失败: {e}')
+        await page.waitForNavigation()
 
-        # 改进的登录验证
         is_logged_in = await page.evaluate('''() => {
             const logoutButton = document.querySelector('a[href="/logout/"]');
-            const currentUrl = window.location.pathname;
-            return logoutButton !== null || currentUrl.includes('/dashboard/') || currentUrl.includes('/home/') || !currentUrl.includes('/login/');
+            return logoutButton !== null;
         }''')
-
-        # 调试信息（可选，生产时可注释）
-        print(f'{service_name} 登录后 URL: {await page.url()}')
-        print(f'{service_name} 登录后标题: {await page.title()}')
-
-        # 可选截图调试（生产时可注释）
-        # await page.screenshot({'path': f'{service_name}_{username}_after_login.png'})
 
         return is_logged_in
 
