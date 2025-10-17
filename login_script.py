@@ -23,9 +23,6 @@ browser = None
 # telegram消息
 message = ""
 
-# 用于存储各个服务成功与失败的账号
-login_results = {}
-
 def get_service_name(panel):
     if 'ct8' in panel:
         return 'CT8'
@@ -40,7 +37,7 @@ def get_service_name(panel):
 async def login(username, password, panel):
     global browser
 
-    page = None
+    page = None  # 确保 page 在任何情况下都被定义
     service_name = get_service_name(panel)
     try:
         if not browser:
@@ -80,6 +77,7 @@ async def login(username, password, panel):
         if page:
             await page.close()
 
+# 显式的浏览器关闭函数
 async def shutdown_browser():
     global browser
     if browser:
@@ -87,7 +85,7 @@ async def shutdown_browser():
         browser = None
 
 async def main():
-    global message, login_results
+    global message
 
     try:
         async with aiofiles.open('accounts.json', mode='r', encoding='utf-8') as f:
@@ -106,29 +104,17 @@ async def main():
         is_logged_in = await login(username, password, panel)
 
         now_beijing = format_to_iso(datetime.utcnow() + timedelta(hours=8))
-
-        # 统计成功和失败的账号
-        if service_name not in login_results:
-            login_results[service_name] = {'success': [], 'fail': []}
-
         if is_logged_in:
-            login_results[service_name]['success'].append(username)
             message += f"✅*{service_name}*账号 *{username}* 于北京时间 {now_beijing} 登录面板成功！\n\n"
             print(f"{service_name}账号 {username} 于北京时间 {now_beijing} 登录面板成功！")
         else:
-            login_results[service_name]['fail'].append(username)
             message += f"❌*{service_name}*账号 *{username}* 于北京时间 {now_beijing} 登录失败\n\n❗请检查 *{username}* 账号和密码是否正确。\n\n"
             print(f"{service_name}账号 {username} 登录失败，请检查 {service_name} 账号和密码是否正确。")
 
         delay = random.randint(1000, 8000)
         await delay_time(delay)
-
-    # 删除之前的登录成功和失败的详情，只保留失败账户统计
-    message += "\n🔚脚本结束，失败账户统计如下：\n"
-    for service, results in login_results.items():
-        if results['fail']:
-            message += f"📦 *{service}* 登录失败账户数: {len(results['fail'])} 个，分别是: {', '.join(results['fail'])}\n"
-
+        
+    message += f"🔚脚本结束，如有异常点击下方按钮👇"
     await send_telegram_message(message)
     print(f'所有账号登录完成！')
     await shutdown_browser()
@@ -150,7 +136,14 @@ async def send_telegram_message(message):
     payload = {
         'chat_id': TELEGRAM_CHAT_ID,
         'text': formatted_message,
-        'parse_mode': 'Markdown'
+        'parse_mode': 'Markdown',
+        'reply_markup': {
+            'inline_keyboard': [
+                [
+                    {'text': '问题反馈❓', 'url': 'https://t.me/yxjsjl'}
+                ]
+            ]
+        }
     }
     headers = {'Content-Type': 'application/json'}
 
