@@ -1,158 +1,102 @@
-import json
-import asyncio
-from pyppeteer import launch
-from datetime import datetime, timedelta
-import aiofiles
-import random
-import requests
-import os
-
-# 从环境变量中获取 Telegram Bot Token 和 Chat ID
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
-
-def format_to_iso(date):
-    return date.strftime('%Y-%m-%d %H:%M:%S')
-
-async def delay_time(ms):
-    await asyncio.sleep(ms / 1000)
-
-# 全局浏览器实例
-browser = None
-
-# telegram消息
-message = ""
-
-def get_service_name(panel):
-    if 'ct8' in panel:
-        return 'CT8'
-    elif 'panel' in panel:
-        try:
-            panel_number = int(panel.split('panel')[1].split('.')[0])
-            return f'S{panel_number}'
-        except ValueError:
-            return 'Unknown'
-    return 'Unknown'
-
 async def login(username, password, panel):
     global browser
-
-    page = None  # 确保 page 在任何情况下都被定义
+    page = None
     service_name = get_service_name(panel)
+    screenshot_path = f'screenshots/{service_name}_{username}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.png'
+
     try:
         if not browser:
-            browser = await launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
+            browser = await launch(headless=False)  # 可视化调试；成功后改True
 
         page = await browser.newPage()
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+        
         url = f'https://{panel}/login/?next=/'
-        await page.goto(url)
+        await page.goto(url, {'waitUntil': 'networkidle2'})
 
-        username_input = await page.querySelector('#id_username')
-        if username_input:
-            await page.evaluate('''(input) => input.value = ""''', username_input)
+        # 等待表单出现（基于JS: data-login-form）
+        await page.waitForSelector('[data-login-form], form:has(input[name="login"]), form:has(input[name="username"])', {'timeout': 10000})
 
-        await page.type('#id_username', username)
-        await page.type('#id_password', password)
-
-        login_button = await page.querySelector('#submit')
-        if login_button:
-            await login_button.click()
-        else:
-            raise Exception('无法找到登录按钮')
-
-        await page.waitForNavigation()
-
-        is_logged_in = await page.evaluate('''() => {
-            const logoutButton = document.querySelector('a[href="/logout/"]');
-            return logoutButton !== null;
+        # 提取CSRF token（如果有，Django常见）
+        csrf_token = await page.evaluate('''() => {
+            const csrf = document.querySelector('input[name="csrfmiddlewaretoken"]');
+            return csrf ? csrf.value : null;
         }''')
+        if csrf_token:
+            print(f'找到CSRF token: {csrf_token[:10]}...')  # 日志
+
+        # 用户名输入：优先name="login"（JS变更），fallback username或ID
+        login_selectors = ['input[name="login"]', 'input[name="username"]', '#id_username']
+        login_input = None
+        for selector in login_selectors:
+            login_input = await page.querySelector(selector)
+            if login_input:
+                print(f'✅ 找到用户名输入: {selector}')
+                break
+        if not login_input:
+            raise Exception('无法找到用户名/登录输入框')
+
+        # 清空并输入（键盘模拟）
+        await page.click(selector)
+        await page.keyboard.down('Control')
+        await page.keyboard.press('a')
+        await page.keyboard.up('Control')
+        await page.keyboard.press('Backspace')
+        await page.type(selector, username)
+
+        # 密码输入：name="password"（确认不变）
+        password_input = await page.querySelector('input[name="password"], #id_password')
+        if not password_input:
+            raise Exception('无法找到密码输入框')
+        print(f'✅ 找到密码输入: input[name="password"]')
+        await page.click('input[name="password"]')
+        await page.keyboard.down('Control')
+        await page.keyboard.press('a')
+        await page.keyboard.up('Control')
+        await page.keyboard.press('Backspace')
+        await page.type('input[name="password"]', password)
+
+        # 提交：优先form.submit()（基于JS on('submit')），无按钮
+        form_selector = '[data-login-form], form:has(input[name="login"]), form'
+        form = await page.querySelector(form_selector)
+        if form:
+            print(f'✅ 找到表单: {form_selector}')
+            # 小延迟 + 提交
+            await asyncio.sleep(0.5)
+            await page.evaluate('form => form.submit()', form)
+        else:
+            # fallback: 按Enter在密码框
+            print('⚠️ 未找到表单，使用Enter提交')
+            await page.keyboard.press('Enter')
+
+        # 等待提交/导航（监听loader或URL变）
+        await page.waitForFunction('''() => {
+            return !document.querySelector('[data-form-loader]') || window.location.pathname !== '/login/';
+        }''', {'timeout': 15000})
+
+        await page.waitForNavigation({'timeout': 10000, 'waitUntil': 'networkidle0'})
+
+        # 成功检查（增强）
+        is_logged_in = await page.evaluate('''() => {
+            const logout = document.querySelector('a[href="/logout/"]') !== null;
+            const notLogin = window.location.pathname !== '/login/';
+            const successMsg = document.querySelector('.alert-success, .dashboard') !== null;
+            return logout || notLogin || successMsg;
+        }''')
+        print(f'登录结果: {"成功" if is_logged_in else "失败"} | 当前URL: {await page.url()}')
+
+        if not is_logged_in:
+            await page.screenshot({'path': screenshot_path, 'fullPage': True})
+            print(f'❌ 截图: {screenshot_path} - 检查验证错误或loader')
 
         return is_logged_in
 
     except Exception as e:
-        print(f'{service_name}账号 {username} 登录时出现错误: {e}')
+        print(f'❌ {service_name} {username} 异常: {e}')
+        if page:
+            await page.screenshot({'path': screenshot_path, 'fullPage': True})
         return False
 
     finally:
         if page:
             await page.close()
-
-# 显式的浏览器关闭函数
-async def shutdown_browser():
-    global browser
-    if browser:
-        await browser.close()
-        browser = None
-
-async def main():
-    global message
-
-    try:
-        async with aiofiles.open('accounts.json', mode='r', encoding='utf-8') as f:
-            accounts_json = await f.read()
-        accounts = json.loads(accounts_json)
-    except Exception as e:
-        print(f'读取 accounts.json 文件时出错: {e}')
-        return
-
-    for account in accounts:
-        username = account['username']
-        password = account['password']
-        panel = account['panel']
-
-        service_name = get_service_name(panel)
-        is_logged_in = await login(username, password, panel)
-
-        now_beijing = format_to_iso(datetime.utcnow() + timedelta(hours=8))
-        if is_logged_in:
-            message += f"✅*{service_name}*账号 *{username}* 于北京时间 {now_beijing} 登录面板成功！\n\n"
-            print(f"{service_name}账号 {username} 于北京时间 {now_beijing} 登录面板成功！")
-        else:
-            message += f"❌*{service_name}*账号 *{username}* 于北京时间 {now_beijing} 登录失败\n\n❗请检查 *{username}* 账号和密码是否正确。\n\n"
-            print(f"{service_name}账号 {username} 登录失败，请检查 {service_name} 账号和密码是否正确。")
-
-        delay = random.randint(1000, 8000)
-        await delay_time(delay)
-        
-    message += f"🔚脚本结束，如有异常点击下方按钮👇"
-    await send_telegram_message(message)
-    print(f'所有账号登录完成！')
-    await shutdown_browser()
-
-async def send_telegram_message(message):
-    formatted_message = f"""
-*🎯 serv00&ct8自动化保号脚本运行报告*
-
-🕰 *北京时间*: {format_to_iso(datetime.utcnow() + timedelta(hours=8))}
-
-⏰ *UTC时间*: {format_to_iso(datetime.utcnow())}
-
-📝 *任务报告*:
-
-{message}
-"""
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        'chat_id': TELEGRAM_CHAT_ID,
-        'text': formatted_message,
-        'parse_mode': 'Markdown',
-        'reply_markup': {
-            'inline_keyboard': [
-                [
-                    {'text': '问题反馈❓', 'url': 'https://t.me/yxjsjl'}
-                ]
-            ]
-        }
-    }
-    headers = {'Content-Type': 'application/json'}
-
-    try:
-        response = requests.post(url, json=payload, headers=headers)
-        if response.status_code != 200:
-            print(f"发送消息到 Telegram 失败: {response.text}")
-    except Exception as e:
-        print(f"发送消息到 Telegram 时出错: {e}")
-
-if __name__ == '__main__':
-    asyncio.run(main())
